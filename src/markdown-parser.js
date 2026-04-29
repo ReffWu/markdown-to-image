@@ -249,14 +249,17 @@ export async function parseMarkdown(mdFilePath) {
         seenContent.add(headingText);
       }
     } else if (token.type === 'list') {
-      // 列表作为原子单元，不可拆分
       const listKey = JSON.stringify(token.items);
       if (!seenContent.has(listKey)) {
-        const htmlContent = tokenToHtml(token);
+        const listTag = token.ordered ? 'ol' : 'ul';
+        const itemHtmls = token.items.map(item => `<li>${marked.parseInline(item.text)}</li>`);
+        const htmlContent = `<${listTag}>${itemHtmls.join('')}</${listTag}>`;
         blocks.push({
           type: 'html',
           content: htmlContent,
-          isAtomic: true
+          isAtomic: true,
+          listTag,
+          listItems: itemHtmls
         });
         seenContent.add(listKey);
       }

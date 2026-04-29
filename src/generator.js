@@ -80,15 +80,18 @@ async function generateTitleCard(browser, title, theme, outputPath, filenameBase
 
   const templatePath = path.join(__dirname, 'templates', 'title-card.html');
   const template = await fs.readFile(templatePath, 'utf-8');
-  const bg = theme.tokens?.background || theme.background || '#ffffff';
-  const fg = theme.tokens?.textPrimary || theme.text || '#000000';
+  const bg = theme.tokens?.background || '#ffffff';
+  const fg = theme.tokens?.textPrimary || '#000000';
+  const fontFamily = theme.typography?.fontCJK || "'PingFang SC', 'Microsoft YaHei', 'Hiragino Sans GB', sans-serif";
   const html = template
     .replace('{{background}}', bg)
     .replace('{{textColor}}', fg)
     .replace('{{fontSize}}', fontSize)
+    .replace('{{fontFamily}}', fontFamily)
     .replace('{{title}}', title);
 
-  await page.setContent(html);
+  await page.setContent(html, { waitUntil: 'load', timeout: 120000 });
+  await page.evaluateHandle('document.fonts.ready');
 
   const filename = filenameBase ? `${filenameBase}.png` : `title-${Date.now()}.png`;
   const filepath = path.join(outputPath, filename);
@@ -238,14 +241,9 @@ async function generateMixedContentCards(browser, blocks, theme, outputPath, car
     .replace(/{{fontHeading}}/g, fontHeading)
     .replace(/{{pageNumber}}/g, '{{pageNumber}}');
 
-  if (theme.glass) {
-    template = template
-      .replace(/background-color: {{backgroundColor}};/, `background-color: ${tokens.background};\n      backdrop-filter: blur(${theme.backdropBlur}px);\n      -webkit-backdrop-filter: blur(${theme.backdropBlur}px);`);
-  }
-
   const hasMermaid = blocks.some(b => b.isMermaid);
   const maxHeight = 2060;
-  const pageGroups = fixOrphanHeadings(await paginateBlocks(page, template, blocks, maxHeight, hasMermaid));
+  const pageGroups = fixLonelyHeadingPages(fixOrphanHeadings(await paginateBlocks(page, template, blocks, maxHeight, hasMermaid)));
   const totalPages = pageGroups.length;
 
   const generatedFiles = [];
@@ -264,7 +262,8 @@ async function paginateBlocks(page, template, blocks, maxHeight, hasMermaid = fa
     .replace(/{{pageNumber}}/g, '1')
     .replace(/{{totalPages}}/g, '1')
     .replace(/{{pageFormat}}/g, 'default');
-  await page.setContent(emptyHtml, { waitUntil: 'domcontentloaded', timeout: 120000 });
+  await page.setContent(emptyHtml, { waitUntil: 'load', timeout: 120000 });
+  await page.evaluateHandle('document.fonts.ready');
 
   if (hasMermaid) {
     await page.addScriptTag({ path: MERMAID_JS_PATH });
@@ -391,8 +390,10 @@ async function paginateBlocks(page, template, blocks, maxHeight, hasMermaid = fa
         }
         if (overflow) remainingBlocks.unshift(overflow);
       } else if (block.tableRows && block.tableRows.length > 1) {
-        // Empty page but table too tall: split starting from row 0 with no prior context
         const chunks = await splitTableBlock(page, block, maxHeight, measureBlocksFn, []);
+        remainingBlocks.unshift(...chunks);
+      } else if (block.listItems && block.listItems.length > 1) {
+        const chunks = await splitListBlock(page, block, maxHeight, measureBlocksFn, []);
         remainingBlocks.unshift(...chunks);
       } else {
         pageGroups.push([block]);
@@ -406,9 +407,22 @@ async function paginateBlocks(page, template, blocks, maxHeight, hasMermaid = fa
         if (overflow) remainingBlocks.unshift(overflow);
       } else if (block.tableRows && block.tableRows.length > 1) {
         // Has prior content: try to fill remaining space, then overflow to next pages
-        const chunks = await splitTableBlock(page, block, maxHeight, measureBlocksFn, currentPageBlocks);
+        // Pass measureWithExtra so Mermaid-rendered height is used for the first chunk measurement
+        const chunks = await splitTableBlock(page, block, maxHeight, measureBlocksFn, currentPageBlocks, measureWithExtra);
         if (chunks.length === 0) {
-          // Nothing fits alongside current content — flush page and retry on fresh page
+          pageGroups.push([...currentPageBlocks]);
+          currentPageBlocks = [];
+          remainingBlocks.unshift(block);
+        } else {
+          if (chunks.length > 0) currentPageBlocks.push(chunks[0]);
+          pageGroups.push([...currentPageBlocks]);
+          currentPageBlocks = [];
+          await resetPage();
+          if (chunks.length > 1) remainingBlocks.unshift(...chunks.slice(1));
+        }
+      } else if (block.listItems && block.listItems.length > 1) {
+        const chunks = await splitListBlock(page, block, maxHeight, measureBlocksFn, currentPageBlocks, measureWithExtra);
+        if (chunks.length === 0) {
           pageGroups.push([...currentPageBlocks]);
           currentPageBlocks = [];
           remainingBlocks.unshift(block);
@@ -501,7 +515,24 @@ function fixOrphanHeadings(pageGroups) {
   return pageGroups;
 }
 
-async function splitTableBlock(page, block, maxHeight, measureFn, priorBlocks = []) {
+function fixLonelyHeadingPages(pageGroups) {
+  for (let i = 0; i < pageGroups.length - 1; i++) {
+    const group = pageGroups[i];
+    if (group.length > 0 && group.every(b => isHeadingBlock(b))) {
+      const nextGroup = pageGroups[i + 1];
+      if (nextGroup.length > 0) {
+        group.push(nextGroup.shift());
+        if (nextGroup.length === 0) {
+          pageGroups.splice(i + 1, 1);
+          i--;
+        }
+      }
+    }
+  }
+  return pageGroups;
+}
+
+async function splitTableBlock(page, block, maxHeight, measureFn, priorBlocks = [], measureExtra = null) {
   const { tableHeader, tableRows } = block;
 
   const buildTableHtml = (rows) => {
@@ -528,8 +559,7 @@ async function splitTableBlock(page, block, maxHeight, measureFn, priorBlocks = 
   const chunks = [];
   let i = 0;
   let currentPrior = priorBlocks;
-  // Extra buffer for table cell text-wrap measurement discrepancies
-  const TABLE_BUFFER = 80;
+  const TABLE_BUFFER = 150;
 
   while (i < tableRows.length) {
     let lo = 1, hi = tableRows.length - i, best = 0;
@@ -537,7 +567,14 @@ async function splitTableBlock(page, block, maxHeight, measureFn, priorBlocks = 
 
     while (lo <= hi) {
       const mid = Math.floor((lo + hi) / 2);
-      const h = await measureFn([...currentPrior, makeBlock(tableRows.slice(i, i + mid))]);
+      // For the first chunk with prior content, use measureExtra so already-rendered Mermaid
+      // heights are reflected correctly (measureBlocksFn replaces innerHTML, losing Mermaid SVGs)
+      let h;
+      if (i === 0 && hasInitialPrior && measureExtra) {
+        h = await measureExtra(`<div class="html-block">${buildTableHtml(tableRows.slice(i, i + mid))}</div>`, false);
+      } else {
+        h = await measureFn([...currentPrior, makeBlock(tableRows.slice(i, i + mid))]);
+      }
       if (h <= threshold) { best = mid; lo = mid + 1; }
       else hi = mid - 1;
     }
@@ -551,6 +588,51 @@ async function splitTableBlock(page, block, maxHeight, measureFn, priorBlocks = 
     }
 
     chunks.push(makeBlock(tableRows.slice(i, i + best)));
+    i += best;
+    currentPrior = [];
+  }
+
+  return chunks;
+}
+
+async function splitListBlock(page, block, maxHeight, measureFn, priorBlocks = [], measureExtra = null) {
+  const { listTag, listItems } = block;
+
+  const makeBlock = (items) => ({
+    ...block,
+    content: `<${listTag}>${items.join('')}</${listTag}>`,
+    listItems: items,
+    isAtomic: true
+  });
+
+  const hasInitialPrior = priorBlocks.length > 0;
+  const chunks = [];
+  let i = 0;
+  let currentPrior = priorBlocks;
+  const LIST_BUFFER = 60;
+
+  while (i < listItems.length) {
+    let lo = 1, hi = listItems.length - i, best = 0;
+    const threshold = maxHeight - LIST_BUFFER;
+
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      let h;
+      if (i === 0 && hasInitialPrior && measureExtra) {
+        h = await measureExtra(`<div class="html-block"><${listTag}>${listItems.slice(i, i + mid).join('')}</${listTag}></div>`, false);
+      } else {
+        h = await measureFn([...currentPrior, makeBlock(listItems.slice(i, i + mid))]);
+      }
+      if (h <= threshold) { best = mid; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+
+    if (best === 0) {
+      if (i === 0 && hasInitialPrior) return [];
+      best = 1;
+    }
+
+    chunks.push(makeBlock(listItems.slice(i, i + best)));
     i += best;
     currentPrior = [];
   }
@@ -597,7 +679,8 @@ async function renderMixedContentCard(page, template, blocks, theme, outputPath,
   }
 
   const html = template.replace('{{content}}', contentHtml).replace(/{{pageNumber}}/g, String(pageNumber).padStart(2, '0')).replace(/{{totalPages}}/g, String(totalPages).padStart(2, '0')).replace(/{{pageFormat}}/g, pageFormat);
-  await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 120000 });
+  await page.setContent(html, { waitUntil: 'load', timeout: 120000 });
+  await page.evaluateHandle('document.fonts.ready');
 
   const pagHasMermaid = hasMermaid && blocks.some(b => b.isMermaid);
   if (pagHasMermaid) {

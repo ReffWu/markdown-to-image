@@ -81,16 +81,6 @@ node ~/.agents/skills/markdown-to-image/src/index.js \
 |-----------|--------|---------|
 | `white` | 简约白 ★默认 | 通用、正式 |
 | `dark` | 深色模式 | 科技、夜间风 |
-| `blue` | 清新蓝 | 清爽、轻量 |
-| `beige` | 米色复古 | 人文、书香 |
-| `apple_light` | Apple 亮色 | 产品、发布 |
-| `apple_dark` | Apple 暗色 | 产品暗色版 |
-| `glass_light` | 毛玻璃亮 | 现代感强 |
-| `glass_dark` | 毛玻璃暗 | 高级感 |
-| `editorial` | 编辑风格 | 杂志、专栏 |
-| `midnight` | 午夜黑 | WWDC 风格 |
-| `ocean` | 海洋蓝 | 深蓝渐变 |
-| `sunset` | 落日橙 | 暖色渐变 |
 
 ## 页码格式
 
