@@ -244,8 +244,8 @@ async function generateMixedContentCards(browser, blocks, theme, outputPath, car
   }
 
   const hasMermaid = blocks.some(b => b.isMermaid);
-  const maxHeight = 2140;
-  const pageGroups = await paginateBlocks(page, template, blocks, maxHeight, hasMermaid);
+  const maxHeight = 2060;
+  const pageGroups = fixOrphanHeadings(await paginateBlocks(page, template, blocks, maxHeight, hasMermaid));
   const totalPages = pageGroups.length;
 
   const generatedFiles = [];
@@ -269,9 +269,43 @@ async function paginateBlocks(page, template, blocks, maxHeight, hasMermaid = fa
   if (hasMermaid) {
     await page.addScriptTag({ path: MERMAID_JS_PATH });
     await page.evaluate(() => {
-      window.__mermaidReady = true;
-      mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'loose' });
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: 'neutral',
+        securityLevel: 'loose',
+        fontSize: 32,
+        flowchart: { useMaxWidth: true, htmlLabels: true }
+      });
     });
+  }
+
+  async function runMermaidAndFixSize(selector) {
+    await page.evaluate(async (sel) => {
+      const nodes = document.querySelectorAll(sel);
+      if (!nodes.length) return;
+      await mermaid.run({ nodes });
+
+      // Content area width = card width minus horizontal padding (120px * 2)
+      const contentWidth = 1200;
+
+      nodes.forEach(el => {
+        el.style.cssText = 'width: 100%; max-width: 100%; display: block;';
+        const svg = el.querySelector('svg');
+        if (!svg) return;
+
+        // Read natural dimensions from viewBox (most reliable source)
+        const vb = svg.viewBox && svg.viewBox.baseVal;
+        const naturalW = (vb && vb.width) || parseFloat(svg.getAttribute('width')) || 800;
+        const naturalH = (vb && vb.height) || parseFloat(svg.getAttribute('height')) || 400;
+
+        const scale = contentWidth / naturalW;
+        svg.removeAttribute('style');
+        svg.setAttribute('width', String(contentWidth));
+        svg.setAttribute('height', String(Math.ceil(naturalH * scale)));
+        svg.style.display = 'block';
+        svg.style.maxWidth = '100%';
+      });
+    }, selector);
   }
 
   function blockToHtml(block) {
@@ -289,9 +323,7 @@ async function paginateBlocks(page, template, blocks, maxHeight, hasMermaid = fa
       root.appendChild(probe);
     }, extraHtml);
     if (isMermaid && hasMermaid) {
-      await page.evaluate(async () => {
-        await mermaid.run({ nodes: document.querySelectorAll('#__measure-probe__ .mermaid') });
-      });
+      await runMermaidAndFixSize('#__measure-probe__ .mermaid');
     }
     const h = await page.evaluate(() => {
       const root = document.getElementById('measure-root');
@@ -310,9 +342,7 @@ async function paginateBlocks(page, template, blocks, maxHeight, hasMermaid = fa
       return root.scrollHeight;
     }, html);
     if (isMermaid && hasMermaid) {
-      await page.evaluate(async () => {
-        await mermaid.run({ nodes: document.querySelectorAll('.mermaid:not([data-processed])') });
-      });
+      await runMermaidAndFixSize('.mermaid:not([data-processed])');
     }
     return page.evaluate(() => document.getElementById('measure-root').scrollHeight);
   }
@@ -443,6 +473,27 @@ async function splitTextBlock(page, template, currentPageBlocks, htmlBlock, maxH
   };
 }
 
+function isHeadingBlock(block) {
+  return block.type === 'html' && /^\s*<h[1-6][\s>]/.test(block.content);
+}
+
+function fixOrphanHeadings(pageGroups) {
+  for (let i = 0; i < pageGroups.length - 1; i++) {
+    const group = pageGroups[i];
+    let trailingHeadings = 0;
+    for (let j = group.length - 1; j >= 0; j--) {
+      if (isHeadingBlock(group[j])) trailingHeadings++;
+      else break;
+    }
+    // Only move headings if they're not the entire page
+    if (trailingHeadings > 0 && trailingHeadings < group.length) {
+      const orphans = group.splice(group.length - trailingHeadings, trailingHeadings);
+      pageGroups[i + 1].unshift(...orphans);
+    }
+  }
+  return pageGroups;
+}
+
 async function splitTableBlock(page, block, maxHeight, measureFn, priorBlocks = []) {
   const { tableHeader, tableRows } = block;
 
@@ -533,9 +584,34 @@ async function renderMixedContentCard(page, template, blocks, theme, outputPath,
   const pagHasMermaid = hasMermaid && blocks.some(b => b.isMermaid);
   if (pagHasMermaid) {
     await page.addScriptTag({ path: MERMAID_JS_PATH });
+    await page.evaluate(() => {
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: 'neutral',
+        securityLevel: 'loose',
+        fontSize: 32,
+        flowchart: { useMaxWidth: true, htmlLabels: true }
+      });
+    });
     await page.evaluate(async () => {
-      mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'loose' });
-      await mermaid.run({ nodes: document.querySelectorAll('.mermaid') });
+      const nodes = document.querySelectorAll('.mermaid');
+      await mermaid.run({ nodes });
+
+      const contentWidth = 1200;
+      nodes.forEach(el => {
+        el.style.cssText = 'width: 100%; max-width: 100%; display: block;';
+        const svg = el.querySelector('svg');
+        if (!svg) return;
+        const vb = svg.viewBox && svg.viewBox.baseVal;
+        const naturalW = (vb && vb.width) || parseFloat(svg.getAttribute('width')) || 800;
+        const naturalH = (vb && vb.height) || parseFloat(svg.getAttribute('height')) || 400;
+        const scale = contentWidth / naturalW;
+        svg.removeAttribute('style');
+        svg.setAttribute('width', String(contentWidth));
+        svg.setAttribute('height', String(Math.ceil(naturalH * scale)));
+        svg.style.display = 'block';
+        svg.style.maxWidth = '100%';
+      });
     });
     await page.waitForFunction(
       () => [...document.querySelectorAll('.mermaid')].every(el => el.querySelector('svg')),

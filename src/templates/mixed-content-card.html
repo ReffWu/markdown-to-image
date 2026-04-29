@@ -209,10 +209,17 @@
       margin-bottom: 0;
     }
 
-    .mermaid-block svg {
+    .mermaid-block .mermaid {
+      width: 100% !important;
+      max-width: 100% !important;
+    }
+
+    .mermaid-block svg,
+    .mermaid-block .mermaid svg {
       width: 100% !important;
       height: auto !important;
-      max-width: 100%;
+      max-width: 100% !important;
+      display: block !important;
     }
 
     /* HTML 块样式 */
