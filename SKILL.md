@@ -13,15 +13,59 @@ description: Use when user wants to convert Markdown content into shareable imag
 
 所有选项均有合理默认值；只有用户主动提出才切换。
 
-## 快速执行
+## 执行流程
+
+### 步骤 0：预检查（必须，在生成前执行）
+
+读取完整 Markdown 文件，检查以下问题：
+
+**技术问题**
+- ChatGPT 引用标记：文件含 `citeturnXviewY` 或 Unicode 私用区字符（U+E000–U+F8FF）
+- 编码异常、乱码字符
+
+**内容问题**
+- 开头有无关内容（如导出说明、来源标注、平台水印文字）
+- 结尾有无关内容（如参考文献列表、脚注、版权声明、"以上内容由AI生成"等）
+- 大段重复或明显不适合做成卡片的内容
+
+**格式问题**
+- 标题层级混乱（如多个 H1、层级跳跃）
+- 表格格式错误
+
+**判断规则：**
+- 如果发现任何问题 → 向用户列出问题摘要，询问"是否修复后再生成？"
+- 如果文件干净 → 直接进入步骤 1，不打扰用户
+
+**修复 ChatGPT 引用标记的方法：**
+```python
+import re
+with open('input.md', 'r', encoding='utf-8') as f:
+    content = f.read()
+cleaned = re.sub(r'cite(\w+)*', '', content)
+cleaned = re.sub(r'[-]', '', cleaned)
+cleaned = re.sub(r'cite\w+', '', cleaned)
+with open('input_clean.md', 'w', encoding='utf-8') as f:
+    f.write(cleaned)
+```
+
+### 步骤 1：确定标题
+
+读文件前 30 行，理解主题，起 4-8 字书名式标题：
+- ✅ `摔PS5惩罚分析` / `AI提问艺术` / `AI时代儿童成长路线图`
+- ❌ `心理学与教育学的专业共识认为母亲用同态报`
+
+### 步骤 2：生成图片（含封面标题卡）
 
 ```bash
 node ~/.agents/skills/markdown-to-image/src/index.js \
   --markdown "/path/to/file.md" \
+  --title "卡片标题" \
   --name "卡片标题"
 ```
 
-输出自动写入 `~/Downloads/<卡片名>/`，文件名格式 `卡片名-01.png … -NN.png`。
+`--title` 会生成封面卡（`-00.png`），内容卡从 `-01.png` 开始。
+
+输出自动写入 `~/Downloads/<卡片名>/`。
 
 ## 默认值（不传即生效）
 
@@ -30,17 +74,6 @@ node ~/.agents/skills/markdown-to-image/src/index.js \
 | `--theme` | `white`（简约白） |
 | `--page-format` | `total`（01 / 12） |
 | `--output` | `~/Downloads/<卡片名>/` |
-| `--name` | 从文件内容智能提取 |
-
-## 命名规则（重要）
-
-文件名含数字 ID（如 `TabAIConversation_1777342720864.md`）时：
-
-1. 读文件前 30 行，理解主题
-2. 自己起 4-8 字书名式标题（不要截句子）
-   - ✅ `摔PS5惩罚分析` / `AI提问艺术` / `河神寓言`
-   - ❌ `心理学与教育学的专业共识认为母亲用同态报`
-3. 用 `--name "起的标题"` 传入
 
 ## 主题速查
 
@@ -67,22 +100,13 @@ node ~/.agents/skills/markdown-to-image/src/index.js \
 --page-format brackets   # (1/12), (2/12)
 ```
 
-## 完整示例
-
-```bash
-node ~/.agents/skills/markdown-to-image/src/index.js \
-  --markdown "/Users/wuruifu/Downloads/TabAIConversation_1777407553373.md" \
-  --name "摔PS5惩罚分析" \
-  --theme white
-```
-
-输出：`~/Downloads/摔PS5惩罚分析/摔PS5惩罚分析-01.png` … `*-NN.png`
-
 ## 常见错误
 
 | 错误 | 正确做法 |
 |------|---------|
+| 跳过预检查直接生成 | 必须先读文件检查，有问题再问用户 |
 | 询问用户要哪个主题 | 直接用 `white`，完成后可提示切换 |
 | 用文件名乱码当卡片名 | 读内容，自己起标题 |
 | 手动传 `--output` | 省略，自动输出到 Downloads |
 | 截句子当标题 | 起书名式短标题（4-8 字） |
+| 不传 `--title` | 总是传 `--title`，生成封面卡 |

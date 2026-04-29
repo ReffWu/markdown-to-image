@@ -261,15 +261,23 @@ export async function parseMarkdown(mdFilePath) {
         seenContent.add(listKey);
       }
     } else if (token.type === 'code') {
-      // 代码块作为原子单元，不可拆分
       const codeKey = token.text;
       if (!seenContent.has(codeKey)) {
-        const htmlContent = tokenToHtml(token);
-        blocks.push({
-          type: 'html',
-          content: htmlContent,
-          isAtomic: true
-        });
+        if (token.lang === 'mermaid') {
+          blocks.push({
+            type: 'html',
+            content: `<div class="mermaid-block"><div class="mermaid">${token.text}</div></div>`,
+            isAtomic: true,
+            isMermaid: true
+          });
+        } else {
+          const htmlContent = tokenToHtml(token);
+          blocks.push({
+            type: 'html',
+            content: htmlContent,
+            isAtomic: true
+          });
+        }
         seenContent.add(codeKey);
       }
     } else if (token.type === 'blockquote') {
@@ -285,14 +293,18 @@ export async function parseMarkdown(mdFilePath) {
         seenContent.add(quoteKey);
       }
     } else if (token.type === 'table') {
-      // 表格作为原子单元，不可拆分
       const tableKey = JSON.stringify(token.header) + JSON.stringify(token.rows);
       if (!seenContent.has(tableKey)) {
         const htmlContent = tokenToHtml(token);
+        // Store raw header/rows so the paginator can split the table across pages
+        const headerCells = token.header.map(cell => marked.parseInline(cell.text));
+        const rowCells = token.rows.map(row => row.map(cell => marked.parseInline(cell.text)));
         blocks.push({
           type: 'html',
           content: htmlContent,
-          isAtomic: true
+          isAtomic: true,
+          tableHeader: headerCells,
+          tableRows: rowCells
         });
         seenContent.add(tableKey);
       }

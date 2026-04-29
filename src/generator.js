@@ -9,6 +9,8 @@ import { parseMarkdown } from './markdown-parser.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const MERMAID_JS_PATH = path.join(__dirname, '..', 'node_modules', 'mermaid', 'dist', 'mermaid.min.js');
+
 /**
  * 生成卡片图片
  * @param {object} options - 配置选项
@@ -70,27 +72,25 @@ export async function generateCards(options) {
 /**
  * 生成标题卡
  */
-async function generateTitleCard(browser, title, theme, outputPath) {
+async function generateTitleCard(browser, title, theme, outputPath, filenameBase = null) {
   const page = await browser.newPage();
   await page.setViewport({ width: 1440, height: 2400 });
 
-  // 计算字体大小
   const fontSize = calculateTitleFontSize(title);
 
-  // 读取并渲染模板
   const templatePath = path.join(__dirname, 'templates', 'title-card.html');
   const template = await fs.readFile(templatePath, 'utf-8');
+  const bg = theme.tokens?.background || theme.background || '#ffffff';
+  const fg = theme.tokens?.textPrimary || theme.text || '#000000';
   const html = template
-    .replace('{{background}}', theme.background)
-    .replace('{{textColor}}', theme.text)
+    .replace('{{background}}', bg)
+    .replace('{{textColor}}', fg)
     .replace('{{fontSize}}', fontSize)
     .replace('{{title}}', title);
 
   await page.setContent(html);
 
-  // 截图
-  const timestamp = Date.now();
-  const filename = `title-${timestamp}.png`;
+  const filename = filenameBase ? `${filenameBase}.png` : `title-${Date.now()}.png`;
   const filepath = path.join(outputPath, filename);
 
   await page.screenshot({
@@ -143,7 +143,7 @@ function generateCardName(mdContent) {
 }
 
 export async function generateCardsFromMarkdown(options) {
-  const { mdFile, theme: themeName = 'white', outputDir = null, cardName: passedName, pageFormat = 'total' } = options;
+  const { mdFile, theme: themeName = 'white', outputDir = null, cardName: passedName, pageFormat = 'total', coverTitle = null } = options;
 
   const theme = themes[themeName];
   if (!theme) {
@@ -184,6 +184,12 @@ export async function generateCardsFromMarkdown(options) {
   const generatedFiles = [];
 
   try {
+    if (coverTitle) {
+      console.log('🖼️  生成封面标题卡...');
+      const coverPath = await generateTitleCard(browser, coverTitle, theme, outputPath, `${cardName}-00`);
+      generatedFiles.unshift(coverPath);
+    }
+
     console.log('🎨 生成图文混排卡片...');
     const cards = await generateMixedContentCards(browser, blocks, theme, outputPath, cardName, pageFormat);
     generatedFiles.push(...cards);
@@ -237,13 +243,14 @@ async function generateMixedContentCards(browser, blocks, theme, outputPath, car
       .replace(/background-color: {{backgroundColor}};/, `background-color: ${tokens.background};\n      backdrop-filter: blur(${theme.backdropBlur}px);\n      -webkit-backdrop-filter: blur(${theme.backdropBlur}px);`);
   }
 
+  const hasMermaid = blocks.some(b => b.isMermaid);
   const maxHeight = 2140;
-  const pageGroups = await paginateBlocks(page, template, blocks, maxHeight);
+  const pageGroups = await paginateBlocks(page, template, blocks, maxHeight, hasMermaid);
   const totalPages = pageGroups.length;
 
   const generatedFiles = [];
   for (let i = 0; i < pageGroups.length; i++) {
-    const filepath = await renderMixedContentCard(page, template, pageGroups[i], theme, outputPath, i + 1, cardName, totalPages, pageFormat);
+    const filepath = await renderMixedContentCard(page, template, pageGroups[i], theme, outputPath, i + 1, cardName, totalPages, pageFormat, hasMermaid);
     generatedFiles.push(filepath);
   }
 
@@ -251,7 +258,7 @@ async function generateMixedContentCards(browser, blocks, theme, outputPath, car
   return generatedFiles;
 }
 
-async function paginateBlocks(page, template, blocks, maxHeight) {
+async function paginateBlocks(page, template, blocks, maxHeight, hasMermaid = false) {
   const emptyHtml = template
     .replace('{{content}}', '<div id="measure-root"></div>')
     .replace(/{{pageNumber}}/g, '1')
@@ -259,30 +266,55 @@ async function paginateBlocks(page, template, blocks, maxHeight) {
     .replace(/{{pageFormat}}/g, 'default');
   await page.setContent(emptyHtml, { waitUntil: 'domcontentloaded', timeout: 120000 });
 
+  if (hasMermaid) {
+    await page.addScriptTag({ path: MERMAID_JS_PATH });
+    await page.evaluate(() => {
+      window.__mermaidReady = true;
+      mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'loose' });
+    });
+  }
+
   function blockToHtml(block) {
     if (block.type === 'html') return `<div class="html-block">${block.content}</div>`;
     if (block.type === 'image') return `<div class="image-block"><img src="${block.base64}" alt="${block.alt || ''}" /></div>`;
     return '';
   }
 
-  async function measureWithExtra(extraHtml) {
-    return page.evaluate((html) => {
+  async function measureWithExtra(extraHtml, isMermaid = false) {
+    await page.evaluate((html) => {
       const root = document.getElementById('measure-root');
       const probe = document.createElement('div');
+      probe.id = '__measure-probe__';
       probe.innerHTML = html;
       root.appendChild(probe);
+    }, extraHtml);
+    if (isMermaid && hasMermaid) {
+      await page.evaluate(async () => {
+        await mermaid.run({ nodes: document.querySelectorAll('#__measure-probe__ .mermaid') });
+      });
+    }
+    const h = await page.evaluate(() => {
+      const root = document.getElementById('measure-root');
+      const probe = document.getElementById('__measure-probe__');
       const h = root.scrollHeight;
       root.removeChild(probe);
       return h;
-    }, extraHtml);
+    });
+    return h;
   }
 
-  async function commitBlock(html) {
-    return page.evaluate((html) => {
+  async function commitBlock(html, isMermaid = false) {
+    await page.evaluate((html) => {
       const root = document.getElementById('measure-root');
       root.insertAdjacentHTML('beforeend', html);
       return root.scrollHeight;
     }, html);
+    if (isMermaid && hasMermaid) {
+      await page.evaluate(async () => {
+        await mermaid.run({ nodes: document.querySelectorAll('.mermaid:not([data-processed])') });
+      });
+    }
+    return page.evaluate(() => document.getElementById('measure-root').scrollHeight);
   }
 
   async function resetPage() {
@@ -314,11 +346,11 @@ async function paginateBlocks(page, template, blocks, maxHeight) {
       block = await handleOversizedCodeBlock(page, template, block, maxHeight, measureBlocksFn);
     }
 
-    const testHeight = await measureWithExtra(blockToHtml(block));
+    const testHeight = await measureWithExtra(blockToHtml(block), block.isMermaid);
 
     if (testHeight <= maxHeight) {
       currentPageBlocks.push(block);
-      await commitBlock(blockToHtml(block));
+      await commitBlock(blockToHtml(block), block.isMermaid);
     } else if (currentPageBlocks.length === 0) {
       if (block.type === 'html' && !block.isAtomic) {
         const { fit, overflow } = await splitTextBlock(page, template, [], block, maxHeight, measureBlocksFn);
@@ -328,6 +360,10 @@ async function paginateBlocks(page, template, blocks, maxHeight) {
           pageGroups.push([block]);
         }
         if (overflow) remainingBlocks.unshift(overflow);
+      } else if (block.tableRows && block.tableRows.length > 1) {
+        // Empty page but table too tall: split starting from row 0 with no prior context
+        const chunks = await splitTableBlock(page, block, maxHeight, measureBlocksFn, []);
+        remainingBlocks.unshift(...chunks);
       } else {
         pageGroups.push([block]);
       }
@@ -338,6 +374,14 @@ async function paginateBlocks(page, template, blocks, maxHeight) {
         if (fit) currentPageBlocks.push(fit);
         pageGroups.push([...currentPageBlocks]);
         if (overflow) remainingBlocks.unshift(overflow);
+      } else if (block.tableRows && block.tableRows.length > 1) {
+        // Has prior content: fill remaining space first, then overflow to next pages
+        const chunks = await splitTableBlock(page, block, maxHeight, measureBlocksFn, currentPageBlocks);
+        if (chunks.length > 0) currentPageBlocks.push(chunks[0]);
+        pageGroups.push([...currentPageBlocks]);
+        currentPageBlocks = [];
+        await resetPage();
+        if (chunks.length > 1) remainingBlocks.unshift(...chunks.slice(1));
       } else {
         pageGroups.push([...currentPageBlocks]);
         remainingBlocks.unshift(block);
@@ -399,6 +443,52 @@ async function splitTextBlock(page, template, currentPageBlocks, htmlBlock, maxH
   };
 }
 
+async function splitTableBlock(page, block, maxHeight, measureFn, priorBlocks = []) {
+  const { tableHeader, tableRows } = block;
+
+  const buildTableHtml = (rows) => {
+    let html = '<table><thead><tr>';
+    tableHeader.forEach(cell => { html += `<th>${cell}</th>`; });
+    html += '</tr></thead><tbody>';
+    rows.forEach(row => {
+      html += '<tr>';
+      row.forEach(cell => { html += `<td>${cell}</td>`; });
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    return html;
+  };
+
+  const makeBlock = (rows) => ({
+    ...block,
+    content: buildTableHtml(rows),
+    tableRows: rows,
+    isAtomic: true
+  });
+
+  const chunks = [];
+  let i = 0;
+  let currentPrior = priorBlocks;
+
+  while (i < tableRows.length) {
+    let lo = 1, hi = tableRows.length - i, best = 0;
+
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      const h = await measureFn([...currentPrior, makeBlock(tableRows.slice(i, i + mid))]);
+      if (h <= maxHeight) { best = mid; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+
+    if (best === 0) best = 1; // force at least one row even if it overflows
+    chunks.push(makeBlock(tableRows.slice(i, i + best)));
+    i += best;
+    currentPrior = []; // subsequent chunks are measured on fresh pages
+  }
+
+  return chunks;
+}
+
 async function measureContentHeight(page, template, blocks) {
   let contentHtml = '';
 
@@ -425,7 +515,7 @@ async function measureContentHeight(page, template, blocks) {
 /**
  * 渲染单个图文混排卡片
  */
-async function renderMixedContentCard(page, template, blocks, theme, outputPath, pageNumber, cardName = 'card', totalPages = 1, pageFormat = 'default') {
+async function renderMixedContentCard(page, template, blocks, theme, outputPath, pageNumber, cardName = 'card', totalPages = 1, pageFormat = 'default', hasMermaid = false) {
   // 构建 HTML 内容
   let contentHtml = '';
 
@@ -439,6 +529,19 @@ async function renderMixedContentCard(page, template, blocks, theme, outputPath,
 
   const html = template.replace('{{content}}', contentHtml).replace(/{{pageNumber}}/g, String(pageNumber).padStart(2, '0')).replace(/{{totalPages}}/g, String(totalPages).padStart(2, '0')).replace(/{{pageFormat}}/g, pageFormat);
   await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 120000 });
+
+  const pagHasMermaid = hasMermaid && blocks.some(b => b.isMermaid);
+  if (pagHasMermaid) {
+    await page.addScriptTag({ path: MERMAID_JS_PATH });
+    await page.evaluate(async () => {
+      mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'loose' });
+      await mermaid.run({ nodes: document.querySelectorAll('.mermaid') });
+    });
+    await page.waitForFunction(
+      () => [...document.querySelectorAll('.mermaid')].every(el => el.querySelector('svg')),
+      { timeout: 15000 }
+    );
+  }
 
   // 截图
   const filename = `${cardName}-${String(pageNumber).padStart(2, '0')}.png`;

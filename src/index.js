@@ -29,7 +29,8 @@ program
           theme: options.theme,
           outputDir: options.output || null,
           cardName: cardName,
-          pageFormat: options.pageFormat
+          pageFormat: options.pageFormat,
+          coverTitle: options.title || null
         });
 
         console.log(chalk.green('\n✨ 生成的文件:'));
