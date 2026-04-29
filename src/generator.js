@@ -405,13 +405,20 @@ async function paginateBlocks(page, template, blocks, maxHeight, hasMermaid = fa
         pageGroups.push([...currentPageBlocks]);
         if (overflow) remainingBlocks.unshift(overflow);
       } else if (block.tableRows && block.tableRows.length > 1) {
-        // Has prior content: fill remaining space first, then overflow to next pages
+        // Has prior content: try to fill remaining space, then overflow to next pages
         const chunks = await splitTableBlock(page, block, maxHeight, measureBlocksFn, currentPageBlocks);
-        if (chunks.length > 0) currentPageBlocks.push(chunks[0]);
-        pageGroups.push([...currentPageBlocks]);
-        currentPageBlocks = [];
-        await resetPage();
-        if (chunks.length > 1) remainingBlocks.unshift(...chunks.slice(1));
+        if (chunks.length === 0) {
+          // Nothing fits alongside current content — flush page and retry on fresh page
+          pageGroups.push([...currentPageBlocks]);
+          currentPageBlocks = [];
+          remainingBlocks.unshift(block);
+        } else {
+          if (chunks.length > 0) currentPageBlocks.push(chunks[0]);
+          pageGroups.push([...currentPageBlocks]);
+          currentPageBlocks = [];
+          await resetPage();
+          if (chunks.length > 1) remainingBlocks.unshift(...chunks.slice(1));
+        }
       } else {
         pageGroups.push([...currentPageBlocks]);
         remainingBlocks.unshift(block);
@@ -517,24 +524,35 @@ async function splitTableBlock(page, block, maxHeight, measureFn, priorBlocks = 
     isAtomic: true
   });
 
+  const hasInitialPrior = priorBlocks.length > 0;
   const chunks = [];
   let i = 0;
   let currentPrior = priorBlocks;
+  // Extra buffer for table cell text-wrap measurement discrepancies
+  const TABLE_BUFFER = 80;
 
   while (i < tableRows.length) {
     let lo = 1, hi = tableRows.length - i, best = 0;
+    const threshold = maxHeight - TABLE_BUFFER;
 
     while (lo <= hi) {
       const mid = Math.floor((lo + hi) / 2);
       const h = await measureFn([...currentPrior, makeBlock(tableRows.slice(i, i + mid))]);
-      if (h <= maxHeight) { best = mid; lo = mid + 1; }
+      if (h <= threshold) { best = mid; lo = mid + 1; }
       else hi = mid - 1;
     }
 
-    if (best === 0) best = 1; // force at least one row even if it overflows
+    if (best === 0) {
+      if (i === 0 && hasInitialPrior) {
+        // Nothing fits alongside prior content — signal caller to flush page first
+        return [];
+      }
+      best = 1; // fresh page: force at least one row to avoid infinite loop
+    }
+
     chunks.push(makeBlock(tableRows.slice(i, i + best)));
     i += best;
-    currentPrior = []; // subsequent chunks are measured on fresh pages
+    currentPrior = [];
   }
 
   return chunks;
